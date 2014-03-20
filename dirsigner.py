@@ -110,7 +110,7 @@ def get_file_hash(full_path, hash_algorithm):
         m = hashlib.sha256()
 
     logger.debug('Opening %s for reading using %d-byte chunks' % (full_path, CHUNK_SIZE))
-    with open(full_path,'rb') as fh:
+    with open(full_path, 'rb') as fh:
         for chunk in iter(lambda: fh.read(CHUNK_SIZE), b''):
             m.update(chunk)
 
