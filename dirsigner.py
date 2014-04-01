@@ -331,7 +331,7 @@ def main():
         lockf(lock_fh, LOCK_EX|LOCK_NB)
     except IOError, ex:
         logger.info('Could not obtain exclusive lock, assuming another process is running.')
-        sys.exit(0)
+        sys.exit(128)
 
     logger.debug('Lock obtained')
 
