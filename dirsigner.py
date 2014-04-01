@@ -53,9 +53,6 @@ def parse_args():
                   default='sha256',
                   help=('Hashing algorithm to use (sha256 default, '
                         'but can be %s)' % ', '.join(HASH_ALGORITHMS)))
-    op.add_option('-s', '--status-file', dest='status_file',
-                  default='dirsigner-status.js',
-                  help='Path to the status file to use (default: %default)')
     op.add_option('-g', '--gnupghome', dest='gnupghome',
                   default=None,
                   help='Set GNUPGHOME to this path (default: use ~/.gnupg)')
@@ -65,6 +62,9 @@ def parse_args():
     op.add_option('-l', '--log-file', dest='logfile',
                   default=None,
                   help='Path to the log file (default: %default)')
+    op.add_option('-k', '--lock-file', dest='lockfile',
+                  default='.dirsigner.lock',
+                  help='Path to the lockfile (default: %default)')
 
     opts, args = op.parse_args()
 
@@ -79,20 +79,25 @@ def parse_args():
 
 def load_status(statusfile):
     if os.path.exists(statusfile):
-        logger.info('Reading status file from %s' % statusfile)
+        logger.debug('Reading status file from %s' % statusfile)
         fh = open(statusfile, 'r')
         contents = fh.read()
         fh.close()
         status = anyjson.deserialize(contents)
         logger.debug('Status file contains %d entries' % len(status.keys()))
     else:
-        logger.info('No status file found, assuming initial run')
+        logger.debug('No status file found, assuming initial run')
         status = {}
 
     return status
 
 
 def save_status(statusfile, status):
+    if not len(status) and os.path.exists(statusfile):
+        logger.debug('Removing obsolete %s' % statusfile)
+        os.unlink(statusfile)
+        return
+
     logger.debug('Saving status into %s' % statusfile)
     logger.debug('Status contains %d entries' % len(status.keys()))
     contents = anyjson.serialize(status)
@@ -149,9 +154,8 @@ def write_sums_file(root, found_files, status, hash_algorithm):
     logger.info('Wrote %s' % sums_file)
 
 
-def sign_tree(tree, statusfile, excludes, hash_algorithm):
+def sign_tree(tree, excludes, hash_algorithm):
     logger.info('Recursively scanning %s' % tree)
-    status = load_status(statusfile)
 
     # Make sure '*sums.asc' and .dirsigner.* are always in excludes
     if '*sums.asc' not in excludes:
@@ -162,11 +166,19 @@ def sign_tree(tree, statusfile, excludes, hash_algorithm):
     logger.debug('Exclude list: %s' % ' '.join(excludes))
 
     for root, dirs, files in os.walk(unicode(tree), topdown=True):
+        logger.debug('Entered %s' % root)
+
+        statusfile = os.path.join(root, '.dirsigner.status.js')
+        status = load_status(statusfile)
+
         found_files = []
         dir_changed = False
 
         for name in files:
             full_path = os.path.join(root, name)
+            if os.path.islink(full_path):
+                logger.debug('Ignoring symlink %s' % name)
+                continue
 
             # Does it match excludes?
             excluded = False
@@ -180,47 +192,47 @@ def sign_tree(tree, statusfile, excludes, hash_algorithm):
 
             # Get stats on the file and compare to what we have in the status
             try:
-                fstat = os.stat(full_path)
+                fstat = os.lstat(full_path)
             except OSError:
                 logger.debug('Was not able to stat %s, ignoring' % full_path)
                 continue
 
-            found_files.append(full_path)
+            found_files.append(name)
             (ctime, mtime, size, inode) = (fstat[9], fstat[8], fstat[6], fstat[1])
 
             # Is this path in status?
             changed = False
-            if full_path in status.keys():
+            if name in status.keys():
                 # Do ctime, mtime and size match?
                 # A bit verbose, but lets us log the exact reason
-                if status[full_path]['ctime'] != ctime:
-                    logger.info('File %s changed ctime' % full_path)
+                if status[name]['ctime'] != ctime:
+                    logger.info('File %s changed ctime' % name)
                     changed = True
-                elif status[full_path]['mtime'] != mtime:
-                    logger.info('File %s changed mtime' % full_path)
+                elif status[name]['mtime'] != mtime:
+                    logger.info('File %s changed mtime' % name)
                     changed = True
-                elif status[full_path]['size'] != size:
-                    logger.info('File %s changed size' % full_path)
+                elif status[name]['size'] != size:
+                    logger.info('File %s changed size' % name)
                     changed = True
-                elif status[full_path]['inode'] != inode:
-                    logger.info('File %s changed inode' % full_path)
+                elif status[name]['inode'] != inode:
+                    logger.info('File %s changed inode' % name)
                     changed = True
             else:
-                logger.info('No previous record of %s' % full_path)
+                logger.debug('No previous record of %s' % name)
                 changed = True
 
             if changed:
                 file_hash = get_file_hash(full_path, hash_algorithm)
 
-                if full_path in status.keys():
-                    if status[full_path]['hash'] != file_hash:
+                if name in status.keys():
+                    if status[name]['hash'] != file_hash:
                         logger.info('%s hash of %s is: %s' % (hash_algorithm, full_path, file_hash))
                         dir_changed = True
                 else:
                     logger.info('%s hash of %s is: %s' % (hash_algorithm, full_path, file_hash))
                     dir_changed = True
 
-                status[full_path] = {
+                status[name] = {
                     'ctime': ctime,
                     'mtime': mtime,
                     'size': size,
@@ -230,11 +242,10 @@ def sign_tree(tree, statusfile, excludes, hash_algorithm):
 
         # Weed out our existing status entries
         for entry in status.keys():
-            if os.path.dirname(entry) == root:
-                if entry not in found_files:
-                    logger.info('File %s from status is no longer there' % entry)
-                    del(status[entry])
-                    dir_changed = True
+            if entry not in found_files:
+                logger.info('File %s from status is no longer there' % entry)
+                del(status[entry])
+                dir_changed = True
 
         sums_file = os.path.join(root, hash_algorithm + 'sums.asc')
         if len(found_files) and not os.path.exists(sums_file):
@@ -251,6 +262,10 @@ def sign_tree(tree, statusfile, excludes, hash_algorithm):
         for name in dirs:
             full_path = os.path.join(root, name)
 
+            if os.path.islink(full_path):
+                logger.debug('Ignoring symlink %s' % name)
+                continue
+
             excluded = False
             for exclude in excludes:
                 if fnmatch.fnmatch(name, exclude) or fnmatch.fnmatch(full_path, exclude):
@@ -263,8 +278,6 @@ def sign_tree(tree, statusfile, excludes, hash_algorithm):
 
         for name in to_rm:
             dirs.remove(name)
-
-    save_status(statusfile, status)
 
 
 def main():
@@ -295,11 +308,8 @@ def main():
         logger.info('Setting GNUPGHOME to %s' % opts.gnupghome)
         os.environ['GNUPGHOME'] = opts.gnupghome
 
-    lockfile = os.path.join(os.path.dirname(opts.status_file),
-                            '.%s.lock' % os.path.basename(opts.status_file))
-
-    lock_fh = open(lockfile, 'w')
-    logger.debug('Obtaining exclusive lock for %s' % lockfile)
+    lock_fh = open(opts.lockfile, 'w')
+    logger.debug('Obtaining exclusive lock for %s' % opts.lockfile)
 
     try:
         lockf(lock_fh, LOCK_EX|LOCK_NB)
@@ -309,7 +319,7 @@ def main():
 
     logger.debug('Lock obtained')
 
-    sign_tree(opts.tree, opts.status_file, opts.excludes, opts.hash_algorithm)
+    sign_tree(opts.tree, opts.excludes, opts.hash_algorithm)
     lockf(lock_fh, LOCK_UN)
     logger.debug('Lock released')
 
