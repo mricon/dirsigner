@@ -22,7 +22,7 @@ import gpgme
 import hashlib
 import fnmatch
 import logging
-import json
+import anyjson
 
 from io import BytesIO
 
@@ -81,8 +81,9 @@ def load_status(statusfile):
     if os.path.exists(statusfile):
         logger.info('Reading status file from %s' % statusfile)
         fh = open(statusfile, 'r')
-        status = json.load(fh)
+        contents = fh.read()
         fh.close()
+        status = anyjson.deserialize(contents)
         logger.debug('Status file contains %d entries' % len(status.keys()))
     else:
         logger.info('No status file found, assuming initial run')
@@ -94,8 +95,9 @@ def load_status(statusfile):
 def save_status(statusfile, status):
     logger.debug('Saving status into %s' % statusfile)
     logger.debug('Status contains %d entries' % len(status.keys()))
+    contents = anyjson.serialize(status)
     fh = open(statusfile, 'w')
-    json.dump(status, fh, indent=2, sort_keys=True)
+    fh.write(contents)
     fh.close()
 
 
