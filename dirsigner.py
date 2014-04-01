@@ -39,6 +39,8 @@ logger = logging.getLogger('dirsigner')
 def parse_args():
     from optparse import OptionParser
 
+    global CHUNK_SIZE
+
     usage = '''usage: %prog [options]
     Iterate recursively through a tree and create signed checksum files
     '''
@@ -62,11 +64,19 @@ def parse_args():
     op.add_option('-l', '--log-file', dest='logfile',
                   default=None,
                   help='Path to the log file (default: %default)')
+    op.add_option('-d', '--debug', dest='debug', action='store_true',
+                  default=False,
+                  help='Add debugging information to the log (default: %default)')
     op.add_option('-k', '--lock-file', dest='lockfile',
                   default='.dirsigner.lock',
                   help='Path to the lockfile (default: %default)')
+    op.add_option('-b', '--chunk-bytes', dest='chunksize', type='int',
+                  default=CHUNK_SIZE,
+                  help='Calculate checksum using chunks of this size (default: %default)')
 
     opts, args = op.parse_args()
+
+    CHUNK_SIZE = opts.chunksize
 
     if not opts.tree:
         op.error('You must provide the path to recursively sign')
@@ -169,7 +179,7 @@ def sign_tree(tree, excludes, hash_algorithm):
         logger.debug('Entered %s' % root)
 
         statusfile = os.path.join(root, '.dirsigner.status.js')
-        status = load_status(statusfile)
+        status = None
 
         found_files = []
         dir_changed = False
@@ -202,6 +212,9 @@ def sign_tree(tree, excludes, hash_algorithm):
 
             # Is this path in status?
             changed = False
+            if status is None:
+                status = load_status(statusfile)
+
             if name in status.keys():
                 # Do ctime, mtime and size match?
                 # A bit verbose, but lets us log the exact reason
@@ -224,13 +237,8 @@ def sign_tree(tree, excludes, hash_algorithm):
             if changed:
                 file_hash = get_file_hash(full_path, hash_algorithm)
 
-                if name in status.keys():
-                    if status[name]['hash'] != file_hash:
-                        logger.info('%s hash of %s is: %s' % (hash_algorithm, full_path, file_hash))
-                        dir_changed = True
-                else:
-                    logger.info('%s hash of %s is: %s' % (hash_algorithm, full_path, file_hash))
-                    dir_changed = True
+                dir_changed = True
+                logger.info('%s hash of %s is: %s' % (hash_algorithm, full_path, file_hash))
 
                 status[name] = {
                     'ctime': ctime,
@@ -240,12 +248,16 @@ def sign_tree(tree, excludes, hash_algorithm):
                     'hash': file_hash,
                     }
 
-        # Weed out our existing status entries
-        for entry in status.keys():
-            if entry not in found_files:
-                logger.info('File %s from status is no longer there' % entry)
-                del(status[entry])
-                dir_changed = True
+        # Weed out our existing status entries, if we have any
+        if os.path.exists(statusfile):
+            if status is None:
+                status = load_status(statusfile)
+
+            for entry in status.keys():
+                if entry not in found_files:
+                    logger.info('File %s from status is no longer there' % entry)
+                    del(status[entry])
+                    dir_changed = True
 
         sums_file = os.path.join(root, hash_algorithm + 'sums.asc')
         if len(found_files) and not os.path.exists(sums_file):
@@ -301,7 +313,11 @@ def main():
         formatter = logging.Formatter("[%(process)d] %(asctime)s - %(levelname)s - %(message)s")
         ch.setFormatter(formatter)
 
-        ch.setLevel(logging.DEBUG)
+        if opts.debug:
+            ch.setLevel(logging.DEBUG)
+        else:
+            ch.setLevel(logging.INFO)
+
         logger.addHandler(ch)
 
     if opts.gnupghome is not None:
