@@ -23,10 +23,12 @@ import hashlib
 import fnmatch
 import logging
 import anyjson
+import re
 
 from io import BytesIO
 
 from fcntl import lockf, LOCK_EX, LOCK_UN, LOCK_NB
+from distutils.version import LooseVersion
 
 
 VERSION = '0.1'
@@ -67,6 +69,9 @@ def parse_args():
     op.add_option('-d', '--debug', dest='debug', action='store_true',
                   default=False,
                   help='Add debugging information to the log (default: %default)')
+    op.add_option('-s', '--version-sort', dest='vsort', action='store_true',
+                  default=False,
+                  help='Sort entries in the sums file by version (default: %default)')
     op.add_option('-k', '--lock-file', dest='lockfile',
                   default='.dirsigner.lock',
                   help='Path to the lockfile (default: %default)')
@@ -85,6 +90,49 @@ def parse_args():
         op.error('Unsupported algorithm: %s' % opts.hash_algorithm)
 
     return opts, args
+
+
+def get_version_info(filen):
+    basen = os.path.basename(filen)
+    # split by last dash
+    nv = basen.rsplit('-', 1)
+    if len(nv) != 2:
+        return basen, LooseVersion('0'), ''
+
+    name, end = nv
+
+    chunks = end.split('.')
+    tail = list()
+    while len(chunks):
+        if re.search(r'\D', chunks[-1]):
+            tail.append(chunks.pop(-1))
+            continue
+        break
+
+    if chunks:
+        ver = LooseVersion('.'.join(chunks))
+    else:
+        ver = LooseVersion('0')
+
+    return name, ver, '.'.join(tail)
+
+
+def version_sort(x, y):
+    namex, verx, tailx = get_version_info(x)
+    namey, very, taily = get_version_info(y)
+    if namex > namey:
+        return 1
+    if namex < namey:
+        return -1
+    if verx > very:
+        return 1
+    if verx < very:
+        return -1
+    if tailx > taily:
+        return 1
+    if tailx < taily:
+        return -1
+    return 0
 
 
 def load_status(statusfile):
@@ -134,7 +182,7 @@ def get_file_hash(full_path, hash_algorithm):
     return m.hexdigest()
 
 
-def write_sums_file(root, found_files, status, hash_algorithm):
+def write_sums_file(root, found_files, status, hash_algorithm, vsort=False):
     # Clean out any stale sums files
     for supported_algorithm in HASH_ALGORITHMS:
         sums_file = os.path.join(root, supported_algorithm + 'sums.asc')
@@ -145,6 +193,9 @@ def write_sums_file(root, found_files, status, hash_algorithm):
         return
 
     tfh = BytesIO()
+    if vsort:
+        logger.info('Version-sorting %s', root)
+        found_files.sort(cmp=version_sort)
     for full_path in found_files:
         filename = os.path.basename(full_path)
         checksum = status[full_path]['hash']
@@ -164,7 +215,7 @@ def write_sums_file(root, found_files, status, hash_algorithm):
     logger.info('Wrote %s' % sums_file)
 
 
-def sign_tree(tree, excludes, hash_algorithm):
+def sign_tree(tree, excludes, hash_algorithm, vsort=False):
     logger.info('Recursively scanning %s' % tree)
 
     # Make sure '*sums.asc' and .dirsigner.* are always in excludes
@@ -265,7 +316,7 @@ def sign_tree(tree, excludes, hash_algorithm):
             dir_changed = True
 
         if dir_changed:
-            write_sums_file(root, found_files, status, hash_algorithm)
+            write_sums_file(root, found_files, status, hash_algorithm, vsort=vsort)
             # Save status after each changed dir
             save_status(statusfile, status)
 
@@ -329,13 +380,13 @@ def main():
 
     try:
         lockf(lock_fh, LOCK_EX|LOCK_NB)
-    except IOError, ex:
+    except IOError as ex:
         logger.info('Could not obtain exclusive lock, assuming another process is running.')
         sys.exit(128)
 
     logger.debug('Lock obtained')
 
-    sign_tree(opts.tree, opts.excludes, opts.hash_algorithm)
+    sign_tree(opts.tree, opts.excludes, opts.hash_algorithm, vsort=opts.vsort)
     lockf(lock_fh, LOCK_UN)
     logger.debug('Lock released')
 
